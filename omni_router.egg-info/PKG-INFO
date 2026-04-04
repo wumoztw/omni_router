@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: omni_router
+Version: 0.1.0
+Summary: A multi-provider AI model router with failover logic.
+Requires-Dist: openai>=1.0.0
+Requires-Dist: pydantic>=2.0.0
+Dynamic: requires-dist
+Dynamic: summary
