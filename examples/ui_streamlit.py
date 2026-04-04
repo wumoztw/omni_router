@@ -66,6 +66,13 @@ with st.sidebar:
         models = free_models_map[selected_provider]
         selected_model = st.selectbox("2. 選擇模型", options=models)
 
+    st.divider()
+    st.subheader("🌐 即時資訊 (RAG)")
+    enable_web_search = st.checkbox("啟用 Tavily 網路搜尋", value=False)
+    tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
+    if enable_web_search and not tavily_api_key:
+        st.warning("⚠️ 啟用搜尋需要提供環境變數 TAVILY_API_KEY。")
+
     if st.button("🗑️ 清空對話"):
         st.session_state.messages = []
         st.rerun()
@@ -99,7 +106,9 @@ if prompt := st.chat_input("輸入訊息以發送給選定的模型..."):
                     response_text = router.chat_complete(
                         system="You are a helpful AI.",
                         user=prompt,
-                        routing_key=target_route
+                        routing_key=target_route,
+                        enable_web_search=enable_web_search,
+                        tavily_api_key=tavily_api_key
                     )
                     st.markdown(response_text)
                     st.session_state.messages.append({"role": "assistant", "content": response_text})

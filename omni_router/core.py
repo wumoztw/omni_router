@@ -8,6 +8,36 @@ from openai import OpenAI, APIConnectionError
 
 logger = logging.getLogger("OmniRouter")
 
+class WebSearcher:
+    @staticmethod
+    def search_tavily(query: str, api_key: str, max_results: int = 5) -> str:
+        if not api_key:
+            return ""
+        try:
+            url = "https://api.tavily.com/search"
+            data = json.dumps({
+                "api_key": api_key,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": max_results
+            }).encode('utf-8')
+            req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=15.0) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                
+                context = []
+                for res in result.get('results', []):
+                    context.append(f"[{res.get('title', 'No Title')}] ({res.get('url', '')}):\n{res.get('content', '')}")
+                
+                if not context:
+                    return ""
+                    
+                context_str = "\n\n".join(context)
+                return f"\n\n### WEB SEARCH RESULTS ###\n{context_str}\n### END WEB SEARCH RESULTS ###\n"
+        except Exception as e:
+            logger.warning(f"⚠️ Tavily web search failed: {e}")
+            return ""
+
 class AIProvider(ABC):
     def __init__(self, name: str, api_key: str, base_url: Optional[str] = None):
         self.name = name
@@ -188,8 +218,18 @@ class AIRouter:
         sanitize_func: Optional[Callable] = None,
         on_provider_success: Optional[Callable] = None,
         return_metadata: bool = False,
-        extra_body: Optional[Dict] = None
+        extra_body: Optional[Dict] = None,
+        enable_web_search: bool = False,
+        tavily_api_key: Optional[str] = None
     ) -> Any:
+        # Inject Web Search if enabled
+        enriched_system = system
+        if enable_web_search and tavily_api_key:
+            logger.info(f"🌐 Fetching web context for query: {user[:50]}...")
+            search_context = WebSearcher.search_tavily(user, tavily_api_key)
+            if search_context:
+                enriched_system += f"\n\nPlease use the following recent web search results to inform your response if they are relevant:\n{search_context}"
+
         candidates = self.model_routing.get(routing_key, self.model_routing.get("default", []))
         last_exception = None
         attempted_providers = []
@@ -207,7 +247,7 @@ class AIRouter:
             try:
                 result = provider.complete(
                     model=model_name,
-                    system=system,
+                    system=enriched_system,
                     user=user,
                     temperature=temperature,
                     max_tokens=max_tokens,
