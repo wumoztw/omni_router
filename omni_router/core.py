@@ -1,5 +1,7 @@
 import time
 import logging
+import json
+import urllib.request
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, List, Any, Callable
 from openai import OpenAI, APIConnectionError
@@ -34,6 +36,44 @@ class AIProvider(ABC):
 
     def get_rate_limiter(self) -> Any:
         return None
+
+    def fetch_free_models(self) -> List[str]:
+        """Fetch available free models dynamically."""
+        if not self._base_url:
+            return []
+            
+        # 1. OpenRouter (API provides explicit pricing)
+        if "openrouter.ai" in self._base_url:
+            try:
+                url = "https://openrouter.ai/api/v1/models"
+                req = urllib.request.Request(url)
+                with urllib.request.urlopen(req, timeout=10.0) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    free_models = []
+                    for model in data.get('data', []):
+                        pricing = model.get('pricing', {})
+                        if pricing.get('prompt') == "0" and pricing.get('completion') == "0":
+                            free_models.append(model.get('id'))
+                    return free_models
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to fetch free models from OpenRouter {self.name}: {e}")
+                return []
+                
+        # 2. Providers inherently free (e.g. Groq, local inference like Ollama/LM Studio)
+        # Here we assume all models accessible via these endpoints are free.
+        free_endpoints = ["api.groq.com", "localhost", "127.0.0.1"]
+        if any(domain in self._base_url for domain in free_endpoints):
+            try:
+                client = self._get_client()
+                if client:
+                    models = client.models.list()
+                    return [m.id for m in models.data]
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to fetch models from free provider {self.name}: {e}")
+                return []
+                
+        # For paid providers (OpenAI, Anthropic), return empty list.
+        return []
 
     def complete(
         self,
@@ -124,6 +164,18 @@ class AIRouter:
 
     def get_provider(self, name: str) -> Optional[AIProvider]:
         return self.providers.get(name)
+
+    def get_all_free_models(self) -> Dict[str, List[str]]:
+        """Return a dictionary mapping provider names to their list of free models."""
+        free_models_map = {}
+        for provider_name, provider in self.providers.items():
+            try:
+                models = provider.fetch_free_models()
+                if models:
+                    free_models_map[provider_name] = models
+            except Exception as e:
+                logger.warning(f"⚠️ Error fetching free models for {provider_name}: {e}")
+        return free_models_map
 
     def chat_complete(
         self,
