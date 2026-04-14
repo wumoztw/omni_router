@@ -39,30 +39,52 @@ class WebSearcher:
             return ""
 
 class AIProvider(ABC):
-    def __init__(self, name: str, api_key: str, base_url: Optional[str] = None):
+    def __init__(self, name: str, api_key: Any, base_url: Optional[str] = None):
         self.name = name
-        self._api_key = api_key
         self._base_url = base_url
         self._client: Optional[OpenAI] = None
+        
+        # Handle single key or list of keys
+        if isinstance(api_key, str):
+            if "," in api_key:
+                self._api_keys = [k.strip() for k in api_key.split(",") if k.strip()]
+            else:
+                self._api_keys = [api_key]
+        elif isinstance(api_key, list):
+            self._api_keys = api_key
+        else:
+            self._api_keys = [api_key] if api_key else []
+            
+        self._current_key_index = 0
+        self._failed_indices = set()
+        logger.info(f"Initialized {self.name} with {len(self._api_keys)} keys.")
+
+    def _get_api_key(self) -> Any:
+        if not self._api_keys or self._current_key_index >= len(self._api_keys):
+            return None
+        return self._api_keys[self._current_key_index]
 
     def _get_client(self) -> Optional[OpenAI]:
-        if not self._client and self._api_key:
-            try:
-                # Handle pydantic SecretStr gracefully if passed
-                key_value = self._api_key.get_secret_value() if hasattr(self._api_key, 'get_secret_value') else self._api_key
-                self._client = OpenAI(
-                    api_key=key_value,
-                    base_url=self._base_url,
-                    timeout=30.0,
-                    max_retries=1
-                )
-                logger.info(f"✅ AI Client Connected: {self.name}")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to init {self.name}: {e}")
+        if not self._client:
+            current_key = self._get_api_key()
+            if current_key:
+                try:
+                    # Handle pydantic SecretStr gracefully if passed
+                    key_value = current_key.get_secret_value() if hasattr(current_key, 'get_secret_value') else current_key
+                    self._client = OpenAI(
+                        api_key=key_value,
+                        base_url=self._base_url,
+                        timeout=30.0,
+                        max_retries=1
+                    )
+                    logger.info(f"✅ {self.name} Client Connected (Key Index: {self._current_key_index})")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to init {self.name} with current key: {e}")
         return self._client
 
     def is_available(self) -> bool:
-        return bool(self._api_key)
+        # Provider is available if there's at least one non-failed key
+        return len(self._api_keys) > len(self._failed_indices)
 
     def get_rate_limiter(self) -> Any:
         return None
@@ -105,6 +127,22 @@ class AIProvider(ABC):
         # For paid providers (OpenAI, Anthropic), return empty list.
         return []
 
+    def rotate_key(self) -> bool:
+        """Rotate to the next available key. Returns True if successful, False if no more keys."""
+        self._failed_indices.add(self._current_key_index)
+        
+        # Find next index not in failed_indices
+        for i in range(len(self._api_keys)):
+            next_index = (self._current_key_index + 1) % len(self._api_keys)
+            self._current_key_index = next_index
+            if self._current_key_index not in self._failed_indices:
+                self._client = None # Force re-init with new key
+                logger.info(f"🔄 {self.name} rotating to next key (Index: {self._current_key_index})")
+                return True
+        
+        logger.warning(f"❌ {self.name} has exhausted all {len(self._api_keys)} keys.")
+        return False
+
     def complete(
         self,
         model: str,
@@ -117,75 +155,96 @@ class AIProvider(ABC):
         extra_body: Optional[Dict] = None
     ) -> str:
         if not self.is_available():
-            raise RuntimeError(f"Provider {self.name} is not available (Missing Key).")
-
-        limiter = self.get_rate_limiter()
-        if limiter and hasattr(limiter, "wait_if_needed"):
-            if not limiter.wait_if_needed(timeout=30):
-                raise RuntimeError(f"Rate limit timeout for {self.name}")
+            raise RuntimeError(f"Provider {self.name} is not available (Missing or Exhausted Keys).")
 
         clean_user = sanitize_func(user) if sanitize_func else user
         estimated_input_tokens = len(clean_user) // 4
         input_tokens = estimated_input_tokens
         output_tokens = 0
-        max_retries = 2
-        last_error = None
+        
+        # Key Rotation Loop
+        while self.is_available():
+            limiter = self.get_rate_limiter()
+            if limiter and hasattr(limiter, "wait_if_needed"):
+                if not limiter.wait_if_needed(timeout=30):
+                    logger.warning(f"⏳ Rate limit timeout for {self.name} (Key: {self._current_key_index})")
+                    if self.rotate_key(): continue
+                    raise RuntimeError(f"Rate limit timeout and no more keys for {self.name}")
 
-        for attempt in range(max_retries + 1):
-            try:
-                client = self._get_client()
-                if not client:
-                    raise RuntimeError(f"Failed to create client for {self.name}")
-                kwargs = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": (system or "").strip()},
-                        {"role": "user", "content": clean_user},
-                    ],
-                    "temperature": float(temperature),
-                    "max_tokens": int(max_tokens),
-                }
-                if extra_body:
-                    kwargs["extra_body"] = extra_body
+            max_retries_per_key = 1
+            last_error = None
 
-                resp = client.chat.completions.create(**kwargs)
-                content = (resp.choices[0].message.content or "").strip()
+            for attempt in range(max_retries_per_key + 1):
+                try:
+                    client = self._get_client()
+                    if not client:
+                        raise RuntimeError(f"Failed to create client for {self.name}")
+                    
+                    kwargs = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": (system or "").strip()},
+                            {"role": "user", "content": clean_user},
+                        ],
+                        "temperature": float(temperature),
+                        "max_tokens": int(max_tokens),
+                    }
+                    if extra_body:
+                        kwargs["extra_body"] = extra_body
 
-                if hasattr(resp, 'usage') and resp.usage:
-                    input_tokens = getattr(resp.usage, 'prompt_tokens', estimated_input_tokens)
-                    output_tokens = getattr(resp.usage, 'completion_tokens', len(content) // 4)
-                else:
-                    output_tokens = len(content) // 4
+                    resp = client.chat.completions.create(**kwargs)
+                    content = (resp.choices[0].message.content or "").strip()
 
-                if cost_callback:
-                    cost_callback(self.name, model, True, input_tokens, output_tokens)
-                return content
+                    if hasattr(resp, 'usage') and resp.usage:
+                        input_tokens = getattr(resp.usage, 'prompt_tokens', estimated_input_tokens)
+                        output_tokens = getattr(resp.usage, 'completion_tokens', len(content) // 4)
+                    else:
+                        output_tokens = len(content) // 4
 
-            except APIConnectionError as e:
-                last_error = e
-                if attempt < max_retries:
-                    wait_time = 2 * (attempt + 1)
-                    logger.warning(f"⚠️ {self.name} connection failed (Attempt {attempt+1}), retrying in {wait_time}s...")
-                    self._client = None
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    break
+                    if cost_callback:
+                        cost_callback(self.name, model, True, input_tokens, output_tokens)
+                    return content
 
-            except Exception as e:
-                if cost_callback:
+                except APIConnectionError as e:
+                    last_error = e
+                    if attempt < max_retries_per_key:
+                        wait_time = 2 * (attempt + 1)
+                        logger.warning(f"⚠️ {self.name} connection failed (Attempt {attempt+1}), retrying in {wait_time}s...")
+                        self._client = None
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        break
+
+                except Exception as e:
+                    error_str = str(e)
+                    if "429" in error_str or "quota" in error_str.lower() or "limit" in error_str.lower():
+                        logger.warning(f"⚠️ Quota/Limit hit for {self.name} (Key Index: {self._current_key_index}): {error_str[:100]}")
+                        if limiter and hasattr(limiter, "reset"):
+                            limiter.reset()
+                        
+                        # Try rotating key instead of just failing
+                        if self.rotate_key():
+                            break # Break inner retry loop to try new key
+                        else:
+                            if cost_callback:
+                                cost_callback(self.name, model, False, input_tokens, 0)
+                            raise RuntimeError(f"All keys exhausted for {self.name} - Last error: {error_str}")
+                    
+                    # Non-quota error
+                    if cost_callback:
+                        cost_callback(self.name, model, False, input_tokens, 0)
+                    logger.error(f"❌ API call failed for {self.name}/{model}: {error_str[:200]}")
+                    raise
+
+            # If we broke out of inner retry loop via a break (quota hit), we continue while loop with next key
+            # If we finished naturally, we need to check if we should try next key or raise
+            if last_error and not self.is_available():
+                 if cost_callback:
                     cost_callback(self.name, model, False, input_tokens, 0)
-                error_str = str(e)
-                if "429" in error_str or "quota" in error_str.lower() or "limit" in error_str.lower():
-                    if limiter and hasattr(limiter, "reset"):
-                        limiter.reset()
-                    raise RuntimeError(f"Quota exhausted or limit reached: {self.name} - {error_str}")
-                logger.error(f"❌ API call failed for {self.name}/{model}: {error_str[:200]}")
-                raise
+                 raise RuntimeError(f"Connection failed after retries and no more keys for {self.name}: {last_error}")
 
-        if cost_callback:
-            cost_callback(self.name, model, False, input_tokens, 0)
-        raise RuntimeError(f"Connection failed after retries for {self.name}: {last_error}")
+        raise RuntimeError(f"❌ All keys exhausted for {self.name}")
 
 class AIRouter:
     def __init__(self, providers: Dict[str, AIProvider], model_routing: Dict[str, List[Dict[str, str]]]):
