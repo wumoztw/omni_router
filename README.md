@@ -2,7 +2,7 @@
 
 `omni_router` 是一個輕量級的中間層架構 (Middleware)，專為解決當前軟體開發中依賴單一 AI 廠商 API 所帶來的不穩定性（如網路斷線、額度耗盡、官方當機等問題）而誕生。透過建立強健的多模型備援機制，確保您的系統永遠在線。
 
-## ✨ 5 大核心功能與特色
+## ✨ 6 大核心功能與特色
 
 ### 1. 統一的無縫接軌介面 (Universal Wrapper)
 由於當今多數 AI 平台皆支援與 OpenAI 相容的終端格式 (`base_url`)，OmniRouter 底層全面統一使用 `openai` 的 Python SDK 進行連線包裝。無論您需要對接 1 家還是 10 家不同的 AI 提供商，所有進送的 Prompt 與歷史記錄格式永遠只需編寫一次，大幅簡化跨平台開發難度。
@@ -24,6 +24,12 @@
 ### 5. 相容的回傳模式 (Return Metadata Mode)
 - 若您只需要普通的內容回復：直接回傳生成的純字串。
 - 若您的專案需要留下完整的稽核與日誌（如 TitanCore）：只要啟用 `return_metadata=True` 旗標，系統便會優雅地回傳包含執行結果狀態、使用的具體供應商與模型的 JSON 字典。
+
+### 6. 動態模型自動探索 (Dynamic Model Discovery)
+系統具備自動抓取最新可用模型的能力，無需手動頻繁更新代碼中的模型字串列：
+- **OpenRouter 深度發現**：自動呼叫 OpenRouter API 獲取所有標價為 0 的免費模型名單。
+- **Google Gemini 支援**：支援自動探索 Google AI Studio 可用模型。
+- **本地端/Groq 自動對接**：自動列出本地端 (Ollama/LM Studio) 或 Groq 平台當前可供調用的模型。
 
 ## 🚀 快速安裝
 您可以直接在任何 Python 專案的 `requirements.txt` 中添加以下程式碼：
