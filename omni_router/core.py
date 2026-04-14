@@ -89,9 +89,9 @@ class AIProvider(ABC):
                 logger.warning(f"⚠️ Failed to fetch free models from OpenRouter {self.name}: {e}")
                 return []
                 
-        # 2. Providers inherently free (e.g. Groq, local inference like Ollama/LM Studio)
+        # 2. Providers inherently free (e.g. Google/Gemini, Groq, local inference like Ollama/LM Studio)
         # Here we assume all models accessible via these endpoints are free.
-        free_endpoints = ["api.groq.com", "localhost", "127.0.0.1"]
+        free_endpoints = ["api.groq.com", "generativelanguage.googleapis.com", "localhost", "127.0.0.1"]
         if any(domain in self._base_url for domain in free_endpoints):
             try:
                 client = self._get_client()
