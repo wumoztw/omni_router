@@ -2,7 +2,7 @@
 
 `omni_router` 是一個輕量級的中間層架構 (Middleware)，專為解決當前軟體開發中依賴單一 AI 廠商 API 所帶來的不穩定性（如網路斷線、額度耗盡、官方當機等問題）而誕生。透過建立強健的多模型備援機制，確保您的系統永遠在線。
 
-## ✨ 6 大核心功能與特色
+## ✨ 7 大核心功能與特色
 
 ### 1. 統一的無縫接軌介面 (Universal Wrapper)
 由於當今多數 AI 平台皆支援與 OpenAI 相容的終端格式 (`base_url`)，OmniRouter 底層全面統一使用 `openai` 的 Python SDK 進行連線包裝。無論您需要對接 1 家還是 10 家不同的 AI 提供商，所有進送的 Prompt 與歷史記錄格式永遠只需編寫一次，大幅簡化跨平台開發難度。
@@ -30,6 +30,12 @@
 - **OpenRouter 深度發現**：自動呼叫 OpenRouter API 獲取所有標價為 0 的免費模型名單。
 - **Google Gemini 支援**：支援自動探索 Google AI Studio 可用模型。
 - **本地端/Groq 自動對接**：自動列出本地端 (Ollama/LM Studio) 或 Groq 平台當前可供調用的模型。
+
+### 7. 多帳號金鑰自動輪詢 (Multi-account Key Rotation)
+針對免費額度有限的平台（如 Groq、Gemini），支援同時傳入多組 API 金鑰：
+- **無縫接力**：當帳號 A 額度耗盡 (429/Quota) 時，Provider 內部會自動切換至帳號 B 並重試，對業務代碼完全透明。
+- **失效記憶**：系統會記錄在本 Session 中已失效的金鑰，避免重複無效嘗試。
+- **配置靈活**：支援傳入 `list` 或以逗號分隔的環境變數。
 
 ## 🚀 快速安裝
 您可以直接在任何 Python 專案的 `requirements.txt` 中添加以下程式碼：
@@ -59,8 +65,9 @@ class GoogleProvider(AIProvider):
         super().__init__("google", key, "https://generativelanguage.googleapis.com/v1beta/openai/")
 
 providers = {
-    "groq": GroqProvider(os.getenv("GROQ_API_KEY")),
-    "google": GoogleProvider(os.getenv("GOOGLE_API_KEY"))
+    # 支援傳入多組金鑰（List 或 逗號分隔字串），當額度耗盡時會自動接力
+    "groq": GroqProvider(os.getenv("GROQ_API_KEY")), # 例如: "key1,key2,key3"
+    "google": GoogleProvider(os.getenv("GOOGLE_AI_API_KEY"))
 }
 
 # 2. 定義瀑布流備援順序
