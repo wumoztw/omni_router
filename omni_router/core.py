@@ -328,12 +328,13 @@ class AIRouter:
                 return result
 
             except RuntimeError as e:
-                err_msg = str(e)
-                if "Quota exhausted" in err_msg or "Rate limit timeout" in err_msg or "Connection failed" in err_msg or "limit reached" in err_msg:
-                    logger.warning(f"⚠️ {model_name} issue, trying next provider... ({err_msg})")
-                    last_exception = e
-                    continue
-                raise
+                # 任何 RuntimeError 都是 complete() 主動拋出的「供應商級」失敗
+                # （金鑰耗盡、不可用、連線失敗、限流逾時等），一律切換下一個候選供應商。
+                # 過往的字串白名單會漏掉 "All keys exhausted" / "not available" 等訊息，
+                # 導致最常見的金鑰耗盡情境直接 raise 而非觸發瀑布備援。
+                logger.warning(f"⚠️ {model_name} ({provider_name}) unavailable, trying next provider... ({e})")
+                last_exception = e
+                continue
 
             except Exception as e:
                 logger.warning(f"⚠️ Error with {model_name} ({provider_name}): {e}")
