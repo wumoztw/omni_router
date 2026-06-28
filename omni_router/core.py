@@ -146,19 +146,37 @@ class AIProvider(ABC):
     def complete(
         self,
         model: str,
-        system: str,
-        user: str,
+        system: str = "",
+        user: str = "",
         temperature: float = 0.7,
         max_tokens: int = 1000,
         cost_callback: Optional[Callable] = None,
         sanitize_func: Optional[Callable] = None,
-        extra_body: Optional[Dict] = None
+        extra_body: Optional[Dict] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         if not self.is_available():
             raise RuntimeError(f"Provider {self.name} is not available (Missing or Exhausted Keys).")
 
-        clean_user = sanitize_func(user) if sanitize_func else user
-        estimated_input_tokens = len(clean_user) // 4
+        # 決定最終要送出的 messages：
+        #   1. 若呼叫端直接提供 messages（多輪對話）→ 原樣透傳，僅對最後一則 user 內容套用 sanitize。
+        #   2. 否則沿用舊的 system + user 兩則組裝（向後相容單輪）。
+        if messages:
+            final_messages = [dict(m) for m in messages]  # 淺複製避免污染呼叫端
+            if sanitize_func:
+                for m in reversed(final_messages):
+                    if m.get("role") == "user":
+                        m["content"] = sanitize_func(m.get("content", ""))
+                        break
+            estimated_input_tokens = sum(len(m.get("content", "")) for m in final_messages) // 4
+        else:
+            clean_user = sanitize_func(user) if sanitize_func else user
+            final_messages = [
+                {"role": "system", "content": (system or "").strip()},
+                {"role": "user", "content": clean_user},
+            ]
+            estimated_input_tokens = len(clean_user) // 4
+
         input_tokens = estimated_input_tokens
         output_tokens = 0
         
@@ -182,10 +200,7 @@ class AIProvider(ABC):
                     
                     kwargs = {
                         "model": model,
-                        "messages": [
-                            {"role": "system", "content": (system or "").strip()},
-                            {"role": "user", "content": clean_user},
-                        ],
+                        "messages": final_messages,
                         "temperature": float(temperature),
                         "max_tokens": int(max_tokens),
                     }
@@ -268,8 +283,8 @@ class AIRouter:
 
     def chat_complete(
         self,
-        system: str,
-        user: str,
+        system: str = "",
+        user: str = "",
         temperature: float = 0.7,
         max_tokens: int = 1000,
         routing_key: str = "default",
@@ -279,15 +294,25 @@ class AIRouter:
         return_metadata: bool = False,
         extra_body: Optional[Dict] = None,
         enable_web_search: bool = False,
-        tavily_api_key: Optional[str] = None
+        tavily_api_key: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
     ) -> Any:
         # Inject Web Search if enabled
         enriched_system = system
+        search_context = None
         if enable_web_search and tavily_api_key:
             logger.info(f"🌐 Fetching web context for query: {user[:50]}...")
             search_context = WebSearcher.search_tavily(user, tavily_api_key)
             if search_context:
-                enriched_system += f"\n\nPlease use the following recent web search results to inform your response if they are relevant:\n{search_context}"
+                enriched_system += f"\\n\\nPlease use the following recent web search results to inform your response if they are relevant:\\n{search_context}"
+
+        # 若提供了 messages，則將 search_context 注入到第一則 system message (若有) 或新增一則 system message
+        if messages and search_context:
+            if messages and messages[0].get("role") == "system":
+                messages[0]["content"] += f"\\n\\nPlease use the following recent web search results...\\n{search_context}"
+            else:
+                messages.insert(0, {"role": "system", "content": f"Please use the following recent web search results...\\n{search_context}"})
+
 
         candidates = self.model_routing.get(routing_key, self.model_routing.get("default", []))
         last_exception = None
@@ -312,7 +337,8 @@ class AIRouter:
                     max_tokens=max_tokens,
                     cost_callback=cost_callback,
                     sanitize_func=sanitize_func,
-                    extra_body=extra_body
+                    extra_body=extra_body,
+                    messages=messages
                 )
                 if on_provider_success:
                     on_provider_success(provider_name, model_name)
