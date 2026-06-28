@@ -2,11 +2,51 @@ import time
 import logging
 import json
 import urllib.request
+import threading
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, List, Any, Callable
 from openai import OpenAI, APIConnectionError
 
 logger = logging.getLogger("OmniRouter")
+
+
+class RateLimiter:
+    """Token Bucket 限流器，支援 RPM 與 RPD 雙重限制。"""
+    def __init__(self, rpm: Optional[int] = None, rpd: Optional[int] = None):
+        self.rpm = rpm
+        self.rpd = rpd
+        self.tokens_rpm = float(rpm) if rpm else float('inf')
+        self.tokens_rpd = float(rpd) if rpd else float('inf')
+        self.last_refill = time.time()
+        self.lock = threading.Lock()
+
+    def _refill(self):
+        now = time.time()
+        delta = now - self.last_refill
+        if self.rpm:
+            refill_amount = delta * (self.rpm / 60.0)
+            self.tokens_rpm = min(self.rpm, self.tokens_rpm + refill_amount)
+        if self.rpd:
+            refill_amount = delta * (self.rpd / 86400.0)
+            self.tokens_rpd = min(self.rpd, self.tokens_rpd + refill_amount)
+        self.last_refill = now
+
+    def wait(self):
+        """阻塞直到有可用 token。"""
+        while True:
+            with self.lock:
+                self._refill()
+                if self.tokens_rpm >= 1 and self.tokens_rpd >= 1:
+                    self.tokens_rpm -= 1
+                    self.tokens_rpd -= 1
+                    return
+                wait_time = 0
+                if self.rpm and self.tokens_rpm < 1:
+                    wait_time = max(wait_time, (1 - self.tokens_rpm) / (self.rpm / 60.0))
+                if self.rpd and self.tokens_rpd < 1:
+                    wait_time = max(wait_time, (1 - self.tokens_rpd) / (self.rpd / 86400.0))
+            time.sleep(wait_time if wait_time > 0 else 0.05)
+
 
 class WebSearcher:
     @staticmethod
@@ -38,11 +78,14 @@ class WebSearcher:
             logger.warning(f"⚠️ Tavily web search failed: {e}")
             return ""
 
+
 class AIProvider(ABC):
-    def __init__(self, name: str, api_key: Any, base_url: Optional[str] = None):
+    def __init__(self, name: str, api_key: Any, base_url: Optional[str] = None, rpm: Optional[int] = None, rpd: Optional[int] = None):
         self.name = name
         self._base_url = base_url
         self._client: Optional[OpenAI] = None
+        self.rpm = rpm
+        self.rpd = rpd
         
         # Handle single key or list of keys
         if isinstance(api_key, str):
@@ -86,7 +129,9 @@ class AIProvider(ABC):
         # Provider is available if there's at least one non-failed key
         return len(self._api_keys) > len(self._failed_indices)
 
-    def get_rate_limiter(self) -> Any:
+    def get_rate_limiter(self) -> Optional[RateLimiter]:
+        if self.rpm or self.rpd:
+            return RateLimiter(rpm=self.rpm, rpd=self.rpd)
         return None
 
     def fetch_free_models(self) -> List[str]:
@@ -183,12 +228,9 @@ class AIProvider(ABC):
         # Key Rotation Loop
         while self.is_available():
             limiter = self.get_rate_limiter()
-            if limiter and hasattr(limiter, "wait_if_needed"):
-                if not limiter.wait_if_needed(timeout=30):
-                    logger.warning(f"⏳ Rate limit timeout for {self.name} (Key: {self._current_key_index})")
-                    if self.rotate_key(): continue
-                    raise RuntimeError(f"Rate limit timeout and no more keys for {self.name}")
-
+            if limiter:
+                limiter.wait()
+            
             max_retries_per_key = 1
             last_error = None
 
@@ -235,8 +277,6 @@ class AIProvider(ABC):
                     error_str = str(e)
                     if "429" in error_str or "quota" in error_str.lower() or "limit" in error_str.lower():
                         logger.warning(f"⚠️ Quota/Limit hit for {self.name} (Key Index: {self._current_key_index}): {error_str[:100]}")
-                        if limiter and hasattr(limiter, "reset"):
-                            limiter.reset()
                         
                         # Try rotating key instead of just failing
                         if self.rotate_key():
@@ -260,6 +300,7 @@ class AIProvider(ABC):
                  raise RuntimeError(f"Connection failed after retries and no more keys for {self.name}: {last_error}")
 
         raise RuntimeError(f"❌ All keys exhausted for {self.name}")
+
 
 class AIRouter:
     def __init__(self, providers: Dict[str, AIProvider], model_routing: Dict[str, List[Dict[str, str]]]):
@@ -304,15 +345,14 @@ class AIRouter:
             logger.info(f"🌐 Fetching web context for query: {user[:50]}...")
             search_context = WebSearcher.search_tavily(user, tavily_api_key)
             if search_context:
-                enriched_system += f"\\n\\nPlease use the following recent web search results to inform your response if they are relevant:\\n{search_context}"
+                enriched_system += f"\n\nPlease use the following recent web search results to inform your response if they are relevant:\n{search_context}"
 
         # 若提供了 messages，則將 search_context 注入到第一則 system message (若有) 或新增一則 system message
         if messages and search_context:
             if messages and messages[0].get("role") == "system":
-                messages[0]["content"] += f"\\n\\nPlease use the following recent web search results...\\n{search_context}"
+                messages[0]["content"] += f"\n\nPlease use the following recent web search results...\n{search_context}"
             else:
-                messages.insert(0, {"role": "system", "content": f"Please use the following recent web search results...\\n{search_context}"})
-
+                messages.insert(0, {"role": "system", "content": f"Please use the following recent web search results...\n{search_context}"})
 
         candidates = self.model_routing.get(routing_key, self.model_routing.get("default", []))
         last_exception = None
