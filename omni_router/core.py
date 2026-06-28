@@ -354,7 +354,16 @@ class AIRouter:
             else:
                 messages.insert(0, {"role": "system", "content": f"Please use the following recent web search results...\n{search_context}"})
 
-        candidates = self.model_routing.get(routing_key, self.model_routing.get("default", []))
+        # 1. 獲取候選名單（優先 routing_key -> 其次 default -> 最後空列表）
+        candidates = self.model_routing.get(routing_key)
+        if candidates is None:
+            logger.warning(f"⚠️ routing_key '{routing_key}' not found, falling back to 'default'")
+            candidates = self.model_routing.get("default", [])
+        
+        if not candidates:
+            logger.error(f"❌ No candidates found for routing_key '{routing_key}' and no 'default' routing available.")
+            raise RuntimeError(f"Routing configuration error: No models defined for '{routing_key}' or 'default'.")
+
         last_exception = None
         attempted_providers = []
 
