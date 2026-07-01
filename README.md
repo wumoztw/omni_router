@@ -73,7 +73,7 @@ providers = {
 # 2. 定義瀑布流備援順序
 model_routing = {
     "default": [
-        {"model": "llama-3.3-70b-versatile", "provider": "groq"},
+        {"model": "openai/gpt-oss-120b", "provider": "openai"},
         {"model": "gemma-4-26b", "provider": "google"}
     ]
 }
